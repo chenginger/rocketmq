@@ -17,16 +17,33 @@
 package org.apache.rocketmq.remoting.netty;
 
 public class NettyServerConfig implements Cloneable {
+    /**
+     * NettyServer监听端口默认为8888
+     * 在NamesrvStartup启动时候将端口改成9876
+     * */
     private int listenPort = 8888;
+    /**NettyServer工作线程.默认为8 */
     private int serverWorkerThreads = 8;
+    /**Netty的public线程池的线程数.默认为0 */
     private int serverCallbackExecutorThreads = 0;
+    /**
+     * netty的IO线程池线程数.默认为3，这里的线程负责解析网络请求。
+     * 这里解析完网络请求之后.会将请求转发给work线程来处理
+     */
     private int serverSelectorThreads = 3;
+    /**
+     * broker端的参数
+     * 就是broker端在基于netty构建网络服务器的时候，会使用下面2个参数
+     */
     private int serverOnewaySemaphoreValue = 256;
     private int serverAsyncSemaphoreValue = 64;
+    /**服务最大空闲时间120S 如果超过这个值会被关闭*/
     private int serverChannelMaxIdleTimeSeconds = 120;
 
+    /**serverSocket sendBuffer缓存和receivedBuffer缓存区的大小*/
     private int serverSocketSndBufSize = NettySystemConfig.socketSndbufSize;
     private int serverSocketRcvBufSize = NettySystemConfig.socketRcvbufSize;
+    /**ByteBuffer是否开启缓存.默认开启*/
     private boolean serverPooledByteBufAllocatorEnable = true;
 
     /**

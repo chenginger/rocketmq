@@ -194,7 +194,9 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
             });
 
         prepareSharableHandlers();
-
+        //这里基于ServerBootstrap的group方法
+        //对netty的服务器进行各种网络上的配置
+        //这里配置不去细究.都是netty相关的知识
         ServerBootstrap childHandler =
             this.serverBootstrap.group(this.eventLoopGroupBoss, this.eventLoopGroupSelector)
                 .channel(useEpoll() ? EpollServerSocketChannel.class : NioServerSocketChannel.class)
@@ -204,7 +206,17 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
                 .childOption(ChannelOption.TCP_NODELAY, true)
                 .childOption(ChannelOption.SO_SNDBUF, nettyServerConfig.getServerSocketSndBufSize())
                 .childOption(ChannelOption.SO_RCVBUF, nettyServerConfig.getServerSocketRcvBufSize())
+                 //端口号设置
                 .localAddress(new InetSocketAddress(this.nettyServerConfig.getListenPort()))
+                /**
+                 * 下面这个地方,说白就是设置了一大堆网络请求处理器
+                 * 只要netty收到一个请求,那么会依次使用下面的处理器来处理
+                 * 比如handshakeHandler就是负责连接握手
+                 *
+                 * NettyDecoder负责编码解码.IdleStateHandler负责空闲管理
+                 * connectionManageHandler是负责网络连接管理
+                 * serverHandler是负责最关键的网络请求处理
+                 * */
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     public void initChannel(SocketChannel ch) throws Exception {
@@ -225,6 +237,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         }
 
         try {
+            //这里就是真正的启动netty服务器.bing就是绑定端口
             ChannelFuture sync = this.serverBootstrap.bind().sync();
             InetSocketAddress addr = (InetSocketAddress) sync.channel().localAddress();
             this.port = addr.getPort();
