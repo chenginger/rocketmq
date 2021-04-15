@@ -33,7 +33,9 @@ public class HAConnection {
     private final HAService haService;
     private final SocketChannel socketChannel;
     private final String clientAddr;
+    //负责维护从节点反馈的复制完成的偏移量，并且通知给发送者线程。
     private WriteSocketService writeSocketService;
+    //复制将 commitLog 中的消息写入到从节点的socket 中。
     private ReadSocketService readSocketService;
 
     private volatile long slaveRequestOffset = -1;
@@ -214,13 +216,15 @@ public class HAConnection {
 
             while (!this.isStopped()) {
                 try {
+                    //阻塞在 selector 上，每一秒循环执行一次，如果还未收到 从节点的拉取请求，则放弃本次处理返回结果0
                     this.selector.select(1000);
 
                     if (-1 == HAConnection.this.slaveRequestOffset) {
                         Thread.sleep(10);
                         continue;
                     }
-
+                    //nextTransferFromWhere 等于-1 表示初次复制数据；slaveRequestOffset 等于 0 表示 要从 master 节点的最大 offset 开始复制，
+                    // 接下来就是计算最大的offset，然后按照指定的offset开始传输数据。 如果是第一次发送数据需要计算出从哪里开始给slave发送数据
                     if (-1 == this.nextTransferFromWhere) {
                         if (0 == HAConnection.this.slaveRequestOffset) {
                             long masterOffset = HAConnection.this.haService.getDefaultMessageStore().getCommitLog().getMaxOffset();
@@ -241,7 +245,8 @@ public class HAConnection {
                         log.info("master transfer data from " + this.nextTransferFromWhere + " to slave[" + HAConnection.this.clientAddr
                             + "], and slave request " + HAConnection.this.slaveRequestOffset);
                     }
-
+                    //lastWriteOver 表示上个事件是否已经写完，默认值为 true。如果当前心跳间隔已经超时了，发送一个心跳包。
+                    // 如果上个事件的数据没写完则继续先写上个事件的数据
                     if (this.lastWriteOver) {
 
                         long interval =
@@ -256,7 +261,7 @@ public class HAConnection {
                             this.byteBufferHeader.putLong(this.nextTransferFromWhere);
                             this.byteBufferHeader.putInt(0);
                             this.byteBufferHeader.flip();
-
+                            //传输数据.将下一个指针转让位置传给客户端
                             this.lastWriteOver = this.transferData();
                             if (!this.lastWriteOver)
                                 continue;
@@ -266,7 +271,9 @@ public class HAConnection {
                         if (!this.lastWriteOver)
                             continue;
                     }
-
+                    //根据下次传输的偏移量，去 commitLog 中查找是否还有未写的数据。
+                    // （1）如果没有则通知所有等待线程继续等待 100ms；
+                    // （2）如果有数据，先确认是否超过一次传输数据的限制，如果超过则设置为最大传输限制大小 32K。所以从节点可能会收到不完整的消息。
                     SelectMappedBufferResult selectResult =
                         HAConnection.this.haService.getDefaultMessageStore().getCommitLogData(this.nextTransferFromWhere);
                     if (selectResult != null) {
@@ -287,10 +294,11 @@ public class HAConnection {
                         this.byteBufferHeader.putLong(thisOffset);
                         this.byteBufferHeader.putInt(size);
                         this.byteBufferHeader.flip();
-
+                        // 发送数据给slave，格式：header（offset（8字节） + body的size（4字节）） + body
                         this.lastWriteOver = this.transferData();
                     } else {
-
+                        // 如果没有需要给slave发送的数据，传输数据的线程等到100ms
+                        // 或者等待broker接收到新发送来的消息的时候唤醒这个线程
                         HAConnection.this.haService.getWaitNotifyObject().allWaitForRunning(100);
                     }
                 } catch (Exception e) {

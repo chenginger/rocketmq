@@ -110,6 +110,9 @@ public class ScheduleMessageService extends ConfigManager {
         return storeTimestamp + 1000;
     }
 
+    /**
+     * broker启动的时候DefaultMessageStore会调用org.apache.rocketmq.store.schedule.ScheduleMessageService#start来启动处理延时消息队列的服务：
+     */
     public void start() {
         if (started.compareAndSet(false, true)) {
             this.timer = new Timer("ScheduleMessageTimerThread", true);
@@ -122,6 +125,7 @@ public class ScheduleMessageService extends ConfigManager {
                 }
 
                 if (timeDelay != null) {
+                    // 每个延时队列启动一个定时任务来处理该队列的延时消息
                     this.timer.schedule(new DeliverDelayedMessageTimerTask(level, offset), FIRST_DELAY_TIME);
                 }
             }
@@ -131,6 +135,7 @@ public class ScheduleMessageService extends ConfigManager {
                 @Override
                 public void run() {
                     try {
+                        // 持久化offsetTable(保存了每个延时队列对应的处理进度offset)
                         if (started.get()) ScheduleMessageService.this.persist();
                     } catch (Throwable e) {
                         log.error("scheduleAtFixedRate flush exception", e);
@@ -161,6 +166,7 @@ public class ScheduleMessageService extends ConfigManager {
     }
 
     public boolean load() {
+        //这个load方法在broker启动的时候DefaultMessageStore会调用来初始化延时等级。
         boolean result = super.load();
         result = result && this.parseDelayLevel();
         return result;
@@ -190,18 +196,22 @@ public class ScheduleMessageService extends ConfigManager {
     }
 
     public boolean parseDelayLevel() {
+        // 每个延时等级延时时间的单位对应的ms数
         HashMap<String, Long> timeUnitTable = new HashMap<String, Long>();
         timeUnitTable.put("s", 1000L);
         timeUnitTable.put("m", 1000L * 60);
         timeUnitTable.put("h", 1000L * 60 * 60);
         timeUnitTable.put("d", 1000L * 60 * 60 * 24);
-
+        // 延时等级在MessageStoreConfig中配置
+        // private String messageDelayLevel = "1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h";
         String levelString = this.defaultMessageStore.getMessageStoreConfig().getMessageDelayLevel();
         try {
+            // 根据空格将配置分隔出每个等级
             String[] levelArray = levelString.split(" ");
             for (int i = 0; i < levelArray.length; i++) {
                 String value = levelArray[i];
                 String ch = value.substring(value.length() - 1);
+                // 时间单位对应的ms数
                 Long tu = timeUnitTable.get(ch);
 
                 int level = i + 1;
@@ -221,6 +231,9 @@ public class ScheduleMessageService extends ConfigManager {
         return true;
     }
 
+    /**
+     * DeliverDelayedMessageTimerTask是一个TimerTask，启动以后不断处理延时队列中的消息，直到出现异常则终止该线程重新启动一个新的TimerTask
+     */
     class DeliverDelayedMessageTimerTask extends TimerTask {
         private final int delayLevel;
         private final long offset;
@@ -260,10 +273,11 @@ public class ScheduleMessageService extends ConfigManager {
         }
 
         public void executeOnTimeup() {
+            // 找到该延时等级对应的ConsumeQueue
             ConsumeQueue cq =
                 ScheduleMessageService.this.defaultMessageStore.findConsumeQueue(SCHEDULE_TOPIC,
                     delayLevel2QueueId(delayLevel));
-
+            // 记录异常情况下一次启动TimerTask开始处理的offset
             long failScheduleOffset = offset;
 
             if (cq != null) {
@@ -274,8 +288,10 @@ public class ScheduleMessageService extends ConfigManager {
                         int i = 0;
                         ConsumeQueueExt.CqExtUnit cqExtUnit = new ConsumeQueueExt.CqExtUnit();
                         for (; i < bufferCQ.getSize(); i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
+                            // 下面三个字段信息是ConsumeQueue物理存储的信息
                             long offsetPy = bufferCQ.getByteBuffer().getLong();
                             int sizePy = bufferCQ.getByteBuffer().getInt();
+                            // 注意这个tagCode，不再是普通的tag的hashCode，而是该延时消息到期的时间
                             long tagsCode = bufferCQ.getByteBuffer().getLong();
 
                             if (cq.isExtAddr(tagsCode)) {
@@ -291,10 +307,11 @@ public class ScheduleMessageService extends ConfigManager {
                             }
 
                             long now = System.currentTimeMillis();
+                            // 计算应该投递该消息的时间，如果已经超时则立即投递
                             long deliverTimestamp = this.correctDeliverTimestamp(now, tagsCode);
 
                             nextOffset = offset + (i / ConsumeQueue.CQ_STORE_UNIT_SIZE);
-
+                            // 判断延时消息是否到期
                             long countdown = deliverTimestamp - now;
 
                             if (countdown <= 0) {
@@ -304,6 +321,7 @@ public class ScheduleMessageService extends ConfigManager {
 
                                 if (msgExt != null) {
                                     try {
+                                        // 将消息恢复到原始消息的格式，恢复topic、queueId、tagCode等，清除属性"DELAY"
                                         MessageExtBrokerInner msgInner = this.messageTimeup(msgExt);
                                         PutMessageResult putMessageResult =
                                             ScheduleMessageService.this.writeMessageStore
@@ -311,12 +329,15 @@ public class ScheduleMessageService extends ConfigManager {
 
                                         if (putMessageResult != null
                                             && putMessageResult.getPutMessageStatus() == PutMessageStatus.PUT_OK) {
+                                            // 投递成功，处理下一个
                                             continue;
                                         } else {
                                             // XXX: warn and notify me
                                             log.error(
                                                 "ScheduleMessageService, a message time up, but reput it failed, topic: {} msgId {}",
                                                 msgExt.getTopic(), msgExt.getMsgId());
+                                            // 投递失败，结束当前task，重新启动TimerTask，从下一个消息开始处理，也就是说当前消息丢弃
+                                            // 更新offsetTable中当前队列的offset为下一个消息的offset
                                             ScheduleMessageService.this.timer.schedule(
                                                 new DeliverDelayedMessageTimerTask(this.delayLevel,
                                                     nextOffset), DELAY_FOR_A_PERIOD);
@@ -327,10 +348,9 @@ public class ScheduleMessageService extends ConfigManager {
                                     } catch (Exception e) {
                                         /*
                                          * XXX: warn and notify me
-
-
-
+                                         重新投递期间出现任何异常，结束当前task，重新启动TimerTask，从当前消息开始重试
                                          */
+
                                         log.error(
                                             "ScheduleMessageService, messageTimeup execute error, drop it. msgExt="
                                                 + msgExt + ", nextOffset=" + nextOffset + ",offsetPy="

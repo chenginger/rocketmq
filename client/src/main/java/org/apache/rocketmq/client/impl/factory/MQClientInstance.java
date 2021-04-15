@@ -162,7 +162,9 @@ public class MQClientInstance {
     public static TopicPublishInfo topicRouteData2TopicPublishInfo(final String topic, final TopicRouteData route) {
         TopicPublishInfo info = new TopicPublishInfo();
         info.setTopicRouteData(route);
+        //如果是topic就会有这块配置.
         if (route.getOrderTopicConf() != null && route.getOrderTopicConf().length() > 0) {
+            //通过配置组装MessageQueue.顺序性应该只有一个messageQueue
             String[] brokers = route.getOrderTopicConf().split(";");
             for (String broker : brokers) {
                 String[] item = broker.split(":");
@@ -178,6 +180,7 @@ public class MQClientInstance {
             List<QueueData> qds = route.getQueueDatas();
             Collections.sort(qds);
             for (QueueData qd : qds) {
+                //只能选择有写权限的broker.无论是集群模式是主从所有只有主节点负责写.单机模式就只有一个节点所以肯定负责写
                 if (PermName.isWriteable(qd.getPerm())) {
                     BrokerData brokerData = null;
                     for (BrokerData bd : route.getBrokerDatas()) {
@@ -190,11 +193,11 @@ public class MQClientInstance {
                     if (null == brokerData) {
                         continue;
                     }
-
+                    //同时broker需要是master.集群模式master写.单机模式brokerid需要为0
                     if (!brokerData.getBrokerAddrs().containsKey(MixAll.MASTER_ID)) {
                         continue;
                     }
-
+                    //获取broker写队列的数量.并组装队列
                     for (int i = 0; i < qd.getWriteQueueNums(); i++) {
                         MessageQueue mq = new MessageQueue(topic, qd.getBrokerName(), i);
                         info.getMessageQueueList().add(mq);
@@ -430,20 +433,21 @@ public class MQClientInstance {
 
     public void checkClientInBroker() throws MQClientException {
         Iterator<Entry<String, MQConsumerInner>> it = this.consumerTable.entrySet().iterator();
-
+        //循环消费者组.正常一个消费者客户端就一个消费者组.
         while (it.hasNext()) {
             Entry<String, MQConsumerInner> entry = it.next();
             Set<SubscriptionData> subscriptionInner = entry.getValue().subscriptions();
             if (subscriptionInner == null || subscriptionInner.isEmpty()) {
                 return;
             }
-
+            //监听消费者组的topic和tag的订阅关系
             for (SubscriptionData subscriptionData : subscriptionInner) {
                 if (ExpressionType.isTagType(subscriptionData.getExpressionType())) {
                     continue;
                 }
                 // may need to check one broker every cluster...
                 // assume that the configs of every broker in cluster are the the same.
+                //随机获取topic的broker地址
                 String addr = findBrokerAddrByTopic(subscriptionData.getTopic());
 
                 if (addr != null) {
@@ -641,13 +645,16 @@ public class MQClientInstance {
 
                             // Update Pub info
                             {
+                                //将从nameserver获取的topic broker信息转换为TopicPublishInfo.
                                 TopicPublishInfo publishInfo = topicRouteData2TopicPublishInfo(topic, topicRouteData);
                                 publishInfo.setHaveTopicRouterInfo(true);
+                                //获取已经注册到producerTable的全部producer
                                 Iterator<Entry<String, MQProducerInner>> it = this.producerTable.entrySet().iterator();
                                 while (it.hasNext()) {
                                     Entry<String, MQProducerInner> entry = it.next();
                                     MQProducerInner impl = entry.getValue();
                                     if (impl != null) {
+                                        //刷新MQProducerInner的topicPublishInfoTable缓存
                                         impl.updateTopicPublishInfo(topic, publishInfo);
                                     }
                                 }
@@ -655,6 +662,7 @@ public class MQClientInstance {
 
                             // Update sub info
                             {
+                                //更新topic和MessageQueue信息关系维护
                                 Set<MessageQueue> subscribeInfo = topicRouteData2TopicSubscribeInfo(topic, topicRouteData);
                                 Iterator<Entry<String, MQConsumerInner>> it = this.consumerTable.entrySet().iterator();
                                 while (it.hasNext()) {
@@ -1097,6 +1105,7 @@ public class MQClientInstance {
         if (topicRouteData != null) {
             List<BrokerData> brokers = topicRouteData.getBrokerDatas();
             if (!brokers.isEmpty()) {
+                //随机获取一个broker的指针.再和brokers的数量取余.一个随机算法.获取的broker的地址
                 int index = random.nextInt(brokers.size());
                 BrokerData bd = brokers.get(index % brokers.size());
                 return bd.selectBrokerAddr();

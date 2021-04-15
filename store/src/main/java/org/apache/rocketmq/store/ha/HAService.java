@@ -44,16 +44,17 @@ public class HAService {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
 
     private final AtomicInteger connectionCount = new AtomicInteger(0);
-
+    //master 和从节点的连接，其中包含了对从节点的读写操作
     private final List<HAConnection> connectionList = new LinkedList<>();
-
+    //监听客户端的实现类，master 节点需要
     private final AcceptSocketService acceptSocketService;
-
+    //当前broker 的消息存储服务实现类，commitLog 就在其中
     private final DefaultMessageStore defaultMessageStore;
-
+    //等待通知的对象
     private final WaitNotifyObject waitNotifyObject = new WaitNotifyObject();
+    //从节点最大复制偏移量
     private final AtomicLong push2SlaveMaxOffset = new AtomicLong(0);
-
+    //负责主从同步复制的通知实现
     private final GroupTransferService groupTransferService;
 
     private final HAClient haClient;
@@ -109,6 +110,7 @@ public class HAService {
         this.acceptSocketService.beginAccept();
         this.acceptSocketService.start();
         this.groupTransferService.start();
+        //启动客户端.拉取master的offset
         this.haClient.start();
     }
 
@@ -172,8 +174,10 @@ public class HAService {
          */
         public void beginAccept() throws Exception {
             this.serverSocketChannel = ServerSocketChannel.open();
+            //Linux平台默认会使用epoll selector provider.
             this.selector = RemotingUtil.openSelector();
             this.serverSocketChannel.socket().setReuseAddress(true);
+            //监听端口 epollAccept事件
             this.serverSocketChannel.socket().bind(this.socketAddressListen);
             this.serverSocketChannel.configureBlocking(false);
             this.serverSocketChannel.register(this.selector, SelectionKey.OP_ACCEPT);
@@ -208,6 +212,7 @@ public class HAService {
                     if (selected != null) {
                         for (SelectionKey k : selected) {
                             if ((k.readyOps() & SelectionKey.OP_ACCEPT) != 0) {
+                                //NIO接收请求
                                 SocketChannel sc = ((ServerSocketChannel) k.channel()).accept();
 
                                 if (sc != null) {
@@ -279,21 +284,23 @@ public class HAService {
             synchronized (this.requestsRead) {
                 if (!this.requestsRead.isEmpty()) {
                     for (CommitLog.GroupCommitRequest req : this.requestsRead) {
+                        //主从复制的偏移量计算
                         boolean transferOK = HAService.this.push2SlaveMaxOffset.get() >= req.getNextOffset();
                         long waitUntilWhen = HAService.this.defaultMessageStore.getSystemClock().now()
                             + HAService.this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout();
                         while (!transferOK && HAService.this.defaultMessageStore.getSystemClock().now() < waitUntilWhen) {
+                            //如果没复制完成， 就让通知对象所在线程继续等待100ms
                             this.notifyTransferObject.waitForRunning(1000);
                             transferOK = HAService.this.push2SlaveMaxOffset.get() >= req.getNextOffset();
                         }
-
+                        //在指定的时间内还是没复制完成
                         if (!transferOK) {
                             log.warn("transfer messsage to slave timeout, " + req.getNextOffset());
                         }
-
+                        // 设置复制结果
                         req.wakeupCustomer(transferOK);
                     }
-
+                    //清空等待通知的请求
                     this.requestsRead.clear();
                 }
             }
@@ -407,6 +414,7 @@ public class HAService {
             int readSizeZeroTimes = 0;
             while (this.byteBufferRead.hasRemaining()) {
                 try {
+                    //从socketChannel中读取数据
                     int readSize = this.socketChannel.read(this.byteBufferRead);
                     if (readSize > 0) {
                         readSizeZeroTimes = 0;
@@ -550,8 +558,17 @@ public class HAService {
 
             while (!this.isStopped()) {
                 try {
+                    /**
+                     * 1.如果当前和 master 节点是连接是正常的，初次启动时会连接到 master 节点。否则等待 5s 后再运行。
+                     * 2.如果到了报告当前节点复制偏移量的时候，就发送复制偏移量给 master 节点。
+                     * 3.每秒处理一次事件，开始处理读取数据事件。
+                     * 4.如果处理读入数据失败，就关闭和 master 节点的socket连接。同时会保存当前节点已经写入的偏移量，因为读入了数据不一定代表处理完了。
+                     * 5.再次尝试报告当前节点的复制偏移量，如果报告失败则忽略下面的步骤
+                     * 6.如果报告成功了，那么检查是否已经超过心跳间隔了，是的话则关闭和 master 的 socket 连接。
+                     */
+                    //连接master.并注册OP_READ读事件
                     if (this.connectMaster()) {
-
+                        //客户端每隔5秒上报salve的offset
                         if (this.isTimeToReportOffset()) {
                             boolean result = this.reportSlaveMaxOffset(this.currentReportedOffset);
                             if (!result) {
@@ -560,7 +577,7 @@ public class HAService {
                         }
 
                         this.selector.select(1000);
-
+                        //如果接收到master的请求时间
                         boolean ok = this.processReadEvent();
                         if (!ok) {
                             this.closeMaster();

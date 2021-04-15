@@ -278,6 +278,7 @@ public class MappedFile extends ReferenceResource {
                     if (writeBuffer != null || this.fileChannel.position() != 0) {
                         this.fileChannel.force(false);
                     } else {
+                        //这个MappedByteBuffer就是JDK NIO包下的API，他的force()方法就是强迫把你写入内存的数据刷入到磁盘文件里去，到此就是同步刷盘成功了
                         this.mappedByteBuffer.force();
                     }
                 } catch (Throwable e) {

@@ -60,6 +60,7 @@ public class MQFaultStrategy {
             try {
                 int index = tpInfo.getSendWhichQueue().getAndIncrement();
                 for (int i = 0; i < tpInfo.getMessageQueueList().size(); i++) {
+                    //用这个index对Topic的MessageQueue列表进行了取模操作，获取到了一个MessageQueue列表的位置，然后返回了这个位置的MessageQueue。
                     int pos = Math.abs(index++) % tpInfo.getMessageQueueList().size();
                     if (pos < 0)
                         pos = 0;
@@ -69,7 +70,7 @@ public class MQFaultStrategy {
                             return mq;
                     }
                 }
-
+                //获取一个不是最优的broker.切换发送消息
                 final String notBestBroker = latencyFaultTolerance.pickOneAtLeast();
                 int writeQueueNums = tpInfo.getQueueIdByBroker(notBestBroker);
                 if (writeQueueNums > 0) {
@@ -85,7 +86,7 @@ public class MQFaultStrategy {
             } catch (Exception e) {
                 log.error("Error occurred when selecting message queue", e);
             }
-
+            //再次选择一个messageQueue.不判断broker的状态
             return tpInfo.selectOneMessageQueue();
         }
 

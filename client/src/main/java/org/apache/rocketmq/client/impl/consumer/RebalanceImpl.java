@@ -219,6 +219,11 @@ public abstract class RebalanceImpl {
     }
 
     public void doRebalance(final boolean isOrder) {
+        /**
+         * getSubscriptionInner在初始化的时候就会设置.
+         * DefaultMQPushConsumer consumer = new DefaultMQPushConsumer("CID_JODIE_1");
+         * consumer.subscribe("TopicTest", "*");//例如这里必须设置一个订阅关系
+         */
         Map<String, SubscriptionData> subTable = this.getSubscriptionInner();
         if (subTable != null) {
             for (final Map.Entry<String, SubscriptionData> entry : subTable.entrySet()) {
@@ -261,6 +266,7 @@ public abstract class RebalanceImpl {
             }
             case CLUSTERING: {
                 Set<MessageQueue> mqSet = this.topicSubscribeInfoTable.get(topic);
+                //获取消费组下的消费者数量
                 List<String> cidAll = this.mQClientFactory.findConsumerIdList(topic, consumerGroup);
                 if (null == mqSet) {
                     if (!topic.startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
@@ -283,6 +289,7 @@ public abstract class RebalanceImpl {
 
                     List<MessageQueue> allocateResult = null;
                     try {
+                        //负载均衡策略.默认为平均消费
                         allocateResult = strategy.allocate(
                             this.consumerGroup,
                             this.mQClientFactory.getClientId(),
@@ -378,6 +385,7 @@ public abstract class RebalanceImpl {
 
                 this.removeDirtyOffset(mq);
                 ProcessQueue pq = new ProcessQueue();
+                //查找消息是否存在下一个指针.如果存在表示已经被消费过了.不进行消费
                 long nextOffset = this.computePullFromWhere(mq);
                 if (nextOffset >= 0) {
                     ProcessQueue pre = this.processQueueTable.putIfAbsent(mq, pq);

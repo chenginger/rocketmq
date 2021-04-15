@@ -2237,7 +2237,7 @@ public class MQClientAPIImpl {
         requestBody.setSubscriptionData(subscriptionData);
 
         request.setBody(requestBody.encode());
-
+        //请求建立连接.建立之后保持长连接
         RemotingCommand response = this.remotingClient.invokeSync(MixAll.brokerVIPChannel(this.clientConfig.isVipChannelEnabled(), brokerAddr), request, timeoutMillis);
 
         assert response != null;

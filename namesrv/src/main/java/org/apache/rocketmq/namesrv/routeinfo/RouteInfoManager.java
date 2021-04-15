@@ -111,18 +111,33 @@ public class RouteInfoManager {
         RegisterBrokerResult result = new RegisterBrokerResult();
         try {
             try {
+                //开启可中断写锁.
                 this.lock.writeLock().lockInterruptibly();
-
+                //通过集群的名称获取Broker名字的列表
                 Set<String> brokerNames = this.clusterAddrTable.get(clusterName);
                 if (null == brokerNames) {
                     brokerNames = new HashSet<String>();
                     this.clusterAddrTable.put(clusterName, brokerNames);
                 }
+                //将名称写入brokerNames.Set可以保证名称是唯一
+                //假如你后续每隔30S发送一次心跳也不影响.进行了去重唯一
                 brokerNames.add(brokerName);
 
                 boolean registerFirst = false;
 
+                //在通过Broker的名称获取到Broker的数据对象.如果不存在就实例化一个.
+                //brokerAddrTable存放了所有Broker的数据
                 BrokerData brokerData = this.brokerAddrTable.get(brokerName);
+
+                /**
+                 * 如果第一次注册的时候.这里就是null
+                 * 那么就会封装一个BrokerData放入路由地址表中
+                 * 其实这个是核心的Broker注册过程
+                 *
+                 * 如果后续每秒注册心跳.这里是没影响的
+                 * 因为明显你重复发送请求的时候,这个BrokerData已经存在了
+                 * 不会重复处理
+                 * */
                 if (null == brokerData) {
                     registerFirst = true;
                     brokerData = new BrokerData(clusterName, brokerName, new HashMap<Long, String>());
@@ -131,6 +146,7 @@ public class RouteInfoManager {
                 Map<Long, String> brokerAddrsMap = brokerData.getBrokerAddrs();
                 //Switch slave to master: first remove <1, IP:PORT> in namesrv, then add <0, IP:PORT>
                 //The same IP:PORT must only have one record in brokerAddrTable
+                //相同ip和端口只能有一份存在brokerAddrsMap缓存中.如果Brokerid发生变化.移除brokerAddrsMap中的数据
                 Iterator<Entry<Long, String>> it = brokerAddrsMap.entrySet().iterator();
                 while (it.hasNext()) {
                     Entry<Long, String> item = it.next();
@@ -138,10 +154,10 @@ public class RouteInfoManager {
                         it.remove();
                     }
                 }
-
+                //将新的BrokerId和对应的ip端口放入缓存中
                 String oldAddr = brokerData.getBrokerAddrs().put(brokerId, brokerAddr);
                 registerFirst = registerFirst || (null == oldAddr);
-
+                //如果brokerId=0.就是master节点
                 if (null != topicConfigWrapper
                     && MixAll.MASTER_ID == brokerId) {
                     if (this.isBrokerTopicConfigChanged(brokerAddr, topicConfigWrapper.getDataVersion())
@@ -150,12 +166,16 @@ public class RouteInfoManager {
                             topicConfigWrapper.getTopicConfigTable();
                         if (tcTable != null) {
                             for (Map.Entry<String, TopicConfig> entry : tcTable.entrySet()) {
+                                //创建和更新队列数据.通过topic的信息给broker组装队列数据
                                 this.createAndUpdateQueueData(brokerName, entry.getValue());
                             }
                         }
                     }
                 }
-
+                //说白就是每个30秒就会封装一个BrokerLiveInfo放入map中
+                //所以每隔30秒都有一个新的BrokerLiveInfo覆盖掉上一次的BrokerLiveInfo
+                //这个BrokerLiveInfo就会有一个当前的时间戳,代表你最近一次心跳的时间
+                //这就是Broker每隔30秒发送注册请求作为心跳的处理逻辑
                 BrokerLiveInfo prevBrokerLiveInfo = this.brokerLiveTable.put(brokerAddr,
                     new BrokerLiveInfo(
                         System.currentTimeMillis(),
@@ -173,7 +193,7 @@ public class RouteInfoManager {
                         this.filterServerTable.put(brokerAddr, filterServerList);
                     }
                 }
-
+                //将HA服务和master地址塞入结果.如果是集群状态的.这里猜测如果BrokerId=0为master节点
                 if (MixAll.MASTER_ID != brokerId) {
                     String masterAddr = brokerData.getBrokerAddrs().get(MixAll.MASTER_ID);
                     if (masterAddr != null) {
@@ -427,14 +447,18 @@ public class RouteInfoManager {
     }
 
     public void scanNotActiveBroker() {
+        //这里遍历了一遍brokerLiveTable里面存放的Broker心跳数据对象.
         Iterator<Entry<String, BrokerLiveInfo>> it = this.brokerLiveTable.entrySet().iterator();
         while (it.hasNext()) {
             Entry<String, BrokerLiveInfo> next = it.next();
             long last = next.getValue().getLastUpdateTimestamp();
+            //如果当前的时间距离上次心跳时间,超过了Broker设置的心跳失效时间 默认120S
+            //也就是说如果一个Broker如果120秒没有发送心跳将会被NameServer剔除
             if ((last + BROKER_CHANNEL_EXPIRED_TIME) < System.currentTimeMillis()) {
                 RemotingUtil.closeChannel(next.getValue().getChannel());
                 it.remove();
                 log.warn("The broker channel expired, {} {}ms", next.getKey(), BROKER_CHANNEL_EXPIRED_TIME);
+                //剔除数据逻辑
                 this.onChannelDestroy(next.getKey(), next.getValue().getChannel());
             }
         }
@@ -445,6 +469,7 @@ public class RouteInfoManager {
         if (channel != null) {
             try {
                 try {
+                    //加读锁.重写对照下数据是否存在.防止并发操作导致额外问题
                     this.lock.readLock().lockInterruptibly();
                     Iterator<Entry<String, BrokerLiveInfo>> itBrokerLiveTable =
                         this.brokerLiveTable.entrySet().iterator();
@@ -468,11 +493,12 @@ public class RouteInfoManager {
         } else {
             log.info("the broker's channel destroyed, {}, clean it's data structure at once", brokerAddrFound);
         }
-
+        //如果需要剔除的Broker地址查询成功
         if (brokerAddrFound != null && brokerAddrFound.length() > 0) {
 
             try {
                 try {
+                    //加写锁将brokerLiveTable、filterServerTable进行剔除操作.并找到brokerAddrTable符合的ip地址进行剔除.
                     this.lock.writeLock().lockInterruptibly();
                     this.brokerLiveTable.remove(brokerAddrFound);
                     this.filterServerTable.remove(brokerAddrFound);
@@ -498,6 +524,7 @@ public class RouteInfoManager {
                         }
 
                         if (brokerData.getBrokerAddrs().isEmpty()) {
+                            //如果brokerData已经剔除到没有ip地址了.设置removeBrokerName为true
                             removeBrokerName = true;
                             itBrokerAddrTable.remove();
                             log.info("remove brokerName[{}] from brokerAddrTable, because channel destroyed",

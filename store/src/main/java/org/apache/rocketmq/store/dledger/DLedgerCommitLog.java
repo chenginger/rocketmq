@@ -414,6 +414,7 @@ public class DLedgerCommitLog extends CommitLog {
             request.setGroup(dLedgerConfig.getGroup());
             request.setRemoteId(dLedgerServer.getMemberState().getSelfId());
             request.setBody(encodeResult.data);
+            //Dleger核心转发append方法 写入本地存储
             dledgerFuture = (AppendFuture<AppendEntryResponse>) dLedgerServer.handleAppend(request);
             if (dledgerFuture.getPos() == -1) {
                 return new PutMessageResult(PutMessageStatus.OS_PAGECACHE_BUSY, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR));
@@ -452,6 +453,7 @@ public class DLedgerCommitLog extends CommitLog {
 
         PutMessageStatus putMessageStatus = PutMessageStatus.UNKNOWN_ERROR;
         try {
+            //3秒就超时抛出异常
             AppendEntryResponse appendEntryResponse = dledgerFuture.get(3, TimeUnit.SECONDS);
             switch (DLedgerResponseCode.valueOf(appendEntryResponse.getCode())) {
                 case SUCCESS:

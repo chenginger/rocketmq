@@ -46,6 +46,9 @@ public class TransactionalMessageCheckService extends ServiceThread {
         log.info("End transaction check service thread!");
     }
 
+    /**
+     * 检查prepare消息.钩子回调client状态.变更prepare消息
+     */
     @Override
     protected void onWaitEnd() {
         long timeout = brokerController.getBrokerConfig().getTransactionTimeOut();

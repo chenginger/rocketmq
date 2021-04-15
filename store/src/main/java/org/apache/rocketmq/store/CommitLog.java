@@ -71,8 +71,10 @@ public class CommitLog {
         this.defaultMessageStore = defaultMessageStore;
 
         if (FlushDiskType.SYNC_FLUSH == defaultMessageStore.getMessageStoreConfig().getFlushDiskType()) {
+            //如果是同步刷盘就初始化GroupCommitService
             this.flushCommitLogService = new GroupCommitService();
         } else {
+            //如果是异步刷盘就初始化FlushRealTimeService
             this.flushCommitLogService = new FlushRealTimeService();
         }
 
@@ -96,6 +98,7 @@ public class CommitLog {
     }
 
     public void start() {
+        //这里启动线程flushCommitLogService.会回调flushCommitLogService的钩子run
         this.flushCommitLogService.start();
 
         if (defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
@@ -572,11 +575,13 @@ public class CommitLog {
                 if (msg.getDelayTimeLevel() > this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel()) {
                     msg.setDelayTimeLevel(this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel());
                 }
-
+                // 设置为延时队列的topic
                 topic = ScheduleMessageService.SCHEDULE_TOPIC;
+                // 每一个延时等级一个queue，queueId = delayLevel - 1
                 queueId = ScheduleMessageService.delayLevel2QueueId(msg.getDelayTimeLevel());
 
                 // Backup real topic, queueId
+                // 备份原始的topic和queueId
                 MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_TOPIC, msg.getTopic());
                 MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(msg.getQueueId()));
                 msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
@@ -600,7 +605,7 @@ public class CommitLog {
 
         MappedFile unlockMappedFile = null;
         MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile();
-
+        //在Broker上写入消息到CommitLog文件的时候，都是串行的，不会让你并发的写入，并发写入文件必然会有数据错乱的问题
         putMessageLock.lock(); //spin or ReentrantLock ,depending on store config
         try {
             long beginLockTimestamp = this.defaultMessageStore.getSystemClock().now();
@@ -618,7 +623,7 @@ public class CommitLog {
                 beginTimeInLock = 0;
                 return new PutMessageResult(PutMessageStatus.CREATE_MAPEDFILE_FAILED, null);
             }
-
+            //其实最关键的是appendMessageCallback.doAppend()这行代码，这行代码其实是把消息追加到MappedFile映射的一块内存里去，并没有直接刷入磁盘中
             result = mappedFile.appendMessage(msg, this.appendMessageCallback);
             switch (result.getStatus()) {
                 case PUT_OK:
@@ -666,7 +671,7 @@ public class CommitLog {
         // Statistics
         storeStatsService.getSinglePutMessageTopicTimesTotal(msg.getTopic()).incrementAndGet();
         storeStatsService.getSinglePutMessageTopicSizeTotal(topic).addAndGet(result.getWroteBytes());
-
+        //核心刷盘方法
         handleDiskFlush(result, putMessageResult, msg);
         handleHA(result, putMessageResult, msg);
 
@@ -679,7 +684,9 @@ public class CommitLog {
             final GroupCommitService service = (GroupCommitService) this.flushCommitLogService;
             if (messageExt.isWaitStoreMsgOK()) {
                 GroupCommitRequest request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
+                //往组提交服务塞入请求.将触发写入操作.
                 service.putRequest(request);
+                //阻塞一个刷新时间.默认5秒.如果超过5秒都没人打断.就表示超时
                 boolean flushOK = request.waitForFlush(this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
                 if (!flushOK) {
                     log.error("do groupcommit, wait for flush failed, topic: " + messageExt.getTopic() + " tags: " + messageExt.getTags()
@@ -1010,7 +1017,7 @@ public class CommitLog {
 
                 int interval = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getFlushIntervalCommitLog();
                 int flushPhysicQueueLeastPages = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getFlushCommitLogLeastPages();
-
+                //刷新间隔10秒
                 int flushPhysicQueueThoroughInterval =
                     CommitLog.this.defaultMessageStore.getMessageStoreConfig().getFlushCommitLogThoroughInterval();
 
@@ -1132,6 +1139,7 @@ public class CommitLog {
 
         private void doCommit() {
             synchronized (this.requestsRead) {
+                //如果requestsRead请求的不为空才执行提交
                 if (!this.requestsRead.isEmpty()) {
                     for (GroupCommitRequest req : this.requestsRead) {
                         // There may be a message in the next file, so a maximum of
@@ -1141,10 +1149,11 @@ public class CommitLog {
                             flushOK = CommitLog.this.mappedFileQueue.getFlushedWhere() >= req.getNextOffset();
 
                             if (!flushOK) {
+                                //将mappedFile刷入磁盘
                                 CommitLog.this.mappedFileQueue.flush(0);
                             }
                         }
-
+                        //唤醒刷新结果.让刷新结果正常返回true
                         req.wakeupCustomer(flushOK);
                     }
 
@@ -1152,7 +1161,7 @@ public class CommitLog {
                     if (storeTimestamp > 0) {
                         CommitLog.this.defaultMessageStore.getStoreCheckpoint().setPhysicMsgTimestamp(storeTimestamp);
                     }
-
+                    //每次执行完情况列表.模拟一个队列的效果
                     this.requestsRead.clear();
                 } else {
                     // Because of individual messages is set to not sync flush, it

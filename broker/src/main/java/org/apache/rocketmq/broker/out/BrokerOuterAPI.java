@@ -122,11 +122,14 @@ public class BrokerOuterAPI {
         final boolean oneway,
         final int timeoutMills,
         final boolean compressed) {
-
+        //实例化一个RegisterBrokerResult注册结果列表
         final List<RegisterBrokerResult> registerBrokerResultList = Lists.newArrayList();
+        //这里是nameServer的地址列表.在初始化的时候已经存储到内存里面
         List<String> nameServerAddressList = this.remotingClient.getNameServerAddressList();
-        if (nameServerAddressList != null && nameServerAddressList.size() > 0) {
 
+        if (nameServerAddressList != null && nameServerAddressList.size() > 0) {
+            //下面这里很关键.它其实是在构建注册的网络请求
+            //首先是组装一个请求头.这里包含了很多信息.包括Broker的地址和ID等
             final RegisterBrokerRequestHeader requestHeader = new RegisterBrokerRequestHeader();
             requestHeader.setBrokerAddr(brokerAddr);
             requestHeader.setBrokerId(brokerId);
@@ -134,20 +137,24 @@ public class BrokerOuterAPI {
             requestHeader.setClusterName(clusterName);
             requestHeader.setHaServerAddr(haServerAddr);
             requestHeader.setCompressed(compressed);
-
+            //请求体包含了上面组装的topicConfigWrapper和一些过滤器
             RegisterBrokerBody requestBody = new RegisterBrokerBody();
             requestBody.setTopicConfigSerializeWrapper(topicConfigWrapper);
             requestBody.setFilterServerList(filterServerList);
             final byte[] body = requestBody.encode(compressed);
             final int bodyCrc32 = UtilAll.crc32(body);
             requestHeader.setBodyCrc32(bodyCrc32);
+            //这里并发处理.要求所有注册必须执行完才算成功.退出阻塞
             final CountDownLatch countDownLatch = new CountDownLatch(nameServerAddressList.size());
+            //遍历nameServer的地址列表.对每个地址都需要进行注册
             for (final String namesrvAddr : nameServerAddressList) {
                 brokerOuterExecutor.execute(new Runnable() {
                     @Override
                     public void run() {
                         try {
+                            //真正注册的方法在这里
                             RegisterBrokerResult result = registerBroker(namesrvAddr,oneway, timeoutMills,requestHeader,body);
+                            //注册完了结果放回list
                             if (result != null) {
                                 registerBrokerResultList.add(result);
                             }
@@ -156,6 +163,7 @@ public class BrokerOuterAPI {
                         } catch (Exception e) {
                             log.warn("registerBroker Exception, {}", namesrvAddr, e);
                         } finally {
+                            //每次执行之后无论是否异常.只要返回了就进行countDown释放
                             countDownLatch.countDown();
                         }
                     }
@@ -179,9 +187,12 @@ public class BrokerOuterAPI {
         final byte[] body
     ) throws RemotingCommandException, MQBrokerException, RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException,
         InterruptedException {
+        //这个弄个Command的对象.将requestHeader和requestBody包装进去.-是否设计模式的命令模式？
+        //其实主要提供了一些远程命令.将远程相关的对象都封装到里面.统一管理.
         RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.REGISTER_BROKER, requestHeader);
         request.setBody(body);
 
+        //不注册模式。这里暂时不分析
         if (oneway) {
             try {
                 this.remotingClient.invokeOneway(namesrvAddr, request, timeoutMills);
@@ -190,8 +201,11 @@ public class BrokerOuterAPI {
             }
             return null;
         }
-
+        //真正的网络请求在这里。
+        //这里注意一下remotingClient其实就是NettyClient的一个包装
+        //这个NettyClient就是用来发送网络请求出去的
         RemotingCommand response = this.remotingClient.invokeSync(namesrvAddr, request, timeoutMills);
+        //下面处理网络请求的结果.并将其封装到result里面并返回
         assert response != null;
         switch (response.getCode()) {
             case ResponseCode.SUCCESS: {
